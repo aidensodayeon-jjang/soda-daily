@@ -56,6 +56,7 @@ struct SearchCandidate: Identifiable {
     @AppStorage("startPlaceID") var startPlaceID = ""
     @AppStorage("endPlaceID") var endPlaceID = ""
     @AppStorage("autoSwapByTime") var autoSwapByTime = false
+    @AppStorage("autoRefreshEnabled") var autoRefreshEnabled = true
 
     @AppStorage("homeLat") var homeLat = ""
     @AppStorage("homeLon") var homeLon = ""
@@ -666,14 +667,43 @@ struct DailyCard: View {
                     Spacer()
                     if let eta = model.eta { Text("예상 도착 \(eta.formatted(date: .omitted, time: .shortened))").font(.caption2).foregroundStyle(.secondary) }
                 }
-                if let updated = model.routeUpdated {
-                    Text("5분마다 자동 갱신 · \(updated.formatted(date: .omitted, time: .shortened))").font(.caption2).foregroundStyle(.secondary)
-                } else {
-                    Button("TMAP 및 장소 설정하기...") {
-                        SettingsWindowController.shared.show()
+                HStack(alignment: .center, spacing: 6) {
+                    Button {
+                        model.autoRefreshEnabled.toggle()
+                        if model.autoRefreshEnabled {
+                            Task { await model.refresh() }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(model.autoRefreshEnabled ? Color.green : Color.secondary.opacity(0.5))
+                                .frame(width: 6, height: 6)
+                            Text(model.autoRefreshEnabled ? "자동갱신 ON" : "자동갱신 OFF")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(model.autoRefreshEnabled ? .primary : .secondary)
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            (model.autoRefreshEnabled ? Color.green.opacity(0.16) : Color.primary.opacity(0.08)),
+                            in: Capsule()
+                        )
                     }
-                    .font(.caption)
-                    .buttonStyle(.link)
+                    .buttonStyle(.plain)
+                    .help("클릭하여 5분마다 자동 갱신 켜기/끄기")
+
+                    if let updated = model.routeUpdated {
+                        Text("\(updated.formatted(date: .omitted, time: .shortened)) 기준")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Button("TMAP/장소 설정...") {
+                            SettingsWindowController.shared.show()
+                        }
+                        .font(.caption2)
+                        .buttonStyle(.link)
+                    }
+                    Spacer(minLength: 0)
                 }
             }
             Divider()
@@ -1239,6 +1269,8 @@ struct SettingsView: View {
                         .frame(height: 24)
                     }
 
+                    Toggle("5분마다 자동 갱신 (날씨 · TMAP 경로 · 일정)", isOn: $model.autoRefreshEnabled)
+                        .font(.callout)
                     Toggle("시간대별 출발↔도착 자동 전환 (\(model.departureHour)시 이후 반대 방향 표시)", isOn: $model.autoSwapByTime)
                         .font(.callout)
                     if model.autoSwapByTime {
@@ -1425,7 +1457,10 @@ struct OpenSettingsButton: View {
         }
         Task { await DailyModel.shared.startup() }
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
-            Task { @MainActor in await DailyModel.shared.refresh() }
+            Task { @MainActor in
+                guard DailyModel.shared.autoRefreshEnabled else { return }
+                await DailyModel.shared.refresh()
+            }
         }
     }
     func applicationWillTerminate(_ notification: Notification) { timer?.invalidate() }
