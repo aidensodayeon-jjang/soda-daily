@@ -5,6 +5,17 @@ import UserNotifications
 import Security
 import ServiceManagement
 import MapKit
+import SQLite3
+
+struct AgentStat: Identifiable {
+    let id: String
+    let name: String
+    let color: Color
+    let sessionPercent: Int
+    let sessionSubtitle: String
+    let weeklyPercent: Int
+    let weeklySubtitle: String
+}
 
 struct Coordinate: Codable {
     var lat: Double
@@ -49,6 +60,8 @@ struct SearchCandidate: Identifiable {
     @Published var hasGoogleCalendar = false
     @Published var calendarAuthorized = false
     @Published var panelVisible = true
+    @Published var agentStats: [AgentStat] = []
+    @Published var selectedAgentTab: String = "all"
 
     @Published var places: [SavedPlace] = [] {
         didSet { savePlaces() }
@@ -57,6 +70,7 @@ struct SearchCandidate: Identifiable {
     @AppStorage("endPlaceID") var endPlaceID = ""
     @AppStorage("autoSwapByTime") var autoSwapByTime = false
     @AppStorage("autoRefreshEnabled") var autoRefreshEnabled = true
+    @AppStorage("showAgentUsage") var showAgentUsage = true
 
     @AppStorage("homeLat") var homeLat = ""
     @AppStorage("homeLon") var homeLon = ""
@@ -193,8 +207,10 @@ struct SearchCandidate: Identifiable {
         defer { refreshing = false }
         async let weatherResult: Void = loadWeather()
         async let routeResult: Void = loadRoute()
+        async let agentResult: Void = loadAgentUsage()
         await weatherResult
         await routeResult
+        await agentResult
         loadEvents()
         checkEventAlerts()
     }
@@ -398,6 +414,325 @@ struct SearchCandidate: Identifiable {
             else { try SMAppService.mainApp.unregister() }
             openAtLogin = enabled
         } catch { errorMessage = "로그인 항목 설정 실패: \(error.localizedDescription)" }
+    }
+
+    func loadAgentUsage() async {
+        let previous = self.agentStats
+        let stats = await Task.detached(priority: .utility) { () -> [AgentStat] in
+            var result: [AgentStat] = []
+            if let claudeStat = await Self.fetchClaudeQuota() ?? previous.first(where: { $0.id == "claude" }) {
+                result.append(claudeStat)
+            }
+            if let codexStat = await Self.fetchCodexQuota() ?? previous.first(where: { $0.id == "codex" }) {
+                result.append(codexStat)
+            }
+            if let geminiStat = Self.fetchGeminiQuota(previous: previous.first(where: { $0.id == "gemini" })) {
+                result.append(geminiStat)
+            }
+            return result
+        }.value
+        self.agentStats = stats
+    }
+
+    nonisolated private static func fetchClaudeQuota() async -> AgentStat? {
+        guard let rawCreds = runSecurityCommand(args: ["find-generic-password", "-s", "Claude Code-credentials", "-w"]),
+              let data = rawCreds.data(using: .utf8),
+              var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var oauth = root["claudeAiOauth"] as? [String: Any],
+              var accessToken = oauth["accessToken"] as? String else {
+            return nil
+        }
+
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let expiresAt = (oauth["expiresAt"] as? Int64) ?? Int64((oauth["expiresAt"] as? Int) ?? 0)
+
+        func callUsage(token: String) async -> (Int, Data)? {
+            guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { return nil }
+            var req = URLRequest(url: url)
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+            req.setValue("claude-code/2.0", forHTTPHeaderField: "User-Agent")
+            req.timeoutInterval = 8
+            guard let (respData, resp) = try? await URLSession.shared.data(for: req),
+                  let http = resp as? HTTPURLResponse else { return nil }
+            return (http.statusCode, respData)
+        }
+
+        var usageResp: (Int, Data)?
+        if expiresAt > 0 && nowMs < expiresAt - 60_000 {
+            usageResp = await callUsage(token: accessToken)
+        }
+
+        if usageResp == nil || usageResp?.0 == 401 {
+            if let refreshToken = oauth["refreshToken"] as? String,
+               let refreshURL = URL(string: "https://platform.claude.com/v1/oauth/token") {
+                var rReq = URLRequest(url: refreshURL)
+                rReq.httpMethod = "POST"
+                rReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                rReq.setValue("claude-code/2.0", forHTTPHeaderField: "User-Agent")
+                rReq.timeoutInterval = 8
+                let bodyObj: [String: Any] = [
+                    "grant_type": "refresh_token",
+                    "refresh_token": refreshToken,
+                    "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+                ]
+                rReq.httpBody = try? JSONSerialization.data(withJSONObject: bodyObj)
+                if let (rData, rHttp) = try? await URLSession.shared.data(for: rReq),
+                   (rHttp as? HTTPURLResponse)?.statusCode == 200,
+                   let rJson = try? JSONSerialization.jsonObject(with: rData) as? [String: Any],
+                   let newAcc = rJson["access_token"] as? String {
+                    accessToken = newAcc
+                    oauth["accessToken"] = newAcc
+                    if let newRef = rJson["refresh_token"] as? String {
+                        oauth["refreshToken"] = newRef
+                    }
+                    if let expIn = rJson["expires_in"] as? Double {
+                        oauth["expiresAt"] = Int64((Date().timeIntervalSince1970 + expIn) * 1000)
+                    }
+                    root["claudeAiOauth"] = oauth
+                    if let updatedData = try? JSONSerialization.data(withJSONObject: root),
+                       let updatedStr = String(data: updatedData, encoding: .utf8) {
+                        _ = runSecurityCommand(args: ["add-generic-password", "-U", "-s", "Claude Code-credentials", "-a", NSUserName(), "-w", updatedStr])
+                    }
+                    usageResp = await callUsage(token: accessToken)
+                }
+            }
+        }
+
+        guard let (status, uData) = usageResp, status == 200,
+              let json = try? JSONSerialization.jsonObject(with: uData) as? [String: Any] else {
+            return nil
+        }
+
+        let fiveHour = json["five_hour"] as? [String: Any]
+        let sevenDay = json["seven_day"] as? [String: Any]
+
+        let sessionPct = Int(((fiveHour?["utilization"] as? Double) ?? 0.0).rounded())
+        let sessionResetStr = fiveHour?["resets_at"] as? String
+        let sessionResetDate = parseISO8601(sessionResetStr)
+
+        let weeklyPct = Int(((sevenDay?["utilization"] as? Double) ?? 0.0).rounded())
+        let weeklyResetStr = sevenDay?["resets_at"] as? String
+        let weeklyResetDate = parseISO8601(weeklyResetStr)
+
+        return AgentStat(
+            id: "claude",
+            name: "Claude",
+            color: .orange,
+            sessionPercent: sessionPct,
+            sessionSubtitle: formatSessionReset(percent: sessionPct, resetDate: sessionResetDate),
+            weeklyPercent: weeklyPct,
+            weeklySubtitle: formatWeeklyReset(resetDate: weeklyResetDate)
+        )
+    }
+
+    nonisolated private static func fetchCodexQuota() async -> AgentStat? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let authPath = "\(home)/.codex/auth.json"
+        guard let authData = try? Data(contentsOf: URL(fileURLWithPath: authPath)),
+              let authObj = try? JSONSerialization.jsonObject(with: authData) as? [String: Any],
+              let tokens = authObj["tokens"] as? [String: Any],
+              let accessToken = tokens["access_token"] as? String,
+              let url = URL(string: "https://chatgpt.com/backend-api/wham/usage") else {
+            return nil
+        }
+        let accountId = (tokens["account_id"] as? String) ?? ""
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        if !accountId.isEmpty {
+            req.setValue(accountId, forHTTPHeaderField: "ChatGPT-Account-Id")
+        }
+        req.setValue("Codex/1.0", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 8
+
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rateLimit = json["rate_limit"] as? [String: Any] else {
+            return nil
+        }
+
+        let primary = rateLimit["primary_window"] as? [String: Any]
+        let secondary = rateLimit["secondary_window"] as? [String: Any]
+
+        let sessionPct = (primary?["used_percent"] as? Int) ?? Int(((primary?["used_percent"] as? Double) ?? 0.0).rounded())
+        let sessionResetTs = (primary?["reset_at"] as? Double) ?? Double((primary?["reset_at"] as? Int) ?? 0)
+        let sessionResetDate = sessionResetTs > 0 ? Date(timeIntervalSince1970: sessionResetTs) : nil
+
+        let weeklyPct = (secondary?["used_percent"] as? Int) ?? Int(((secondary?["used_percent"] as? Double) ?? 0.0).rounded())
+        let weeklyResetTs = (secondary?["reset_at"] as? Double) ?? Double((secondary?["reset_at"] as? Int) ?? 0)
+        let weeklyResetDate = weeklyResetTs > 0 ? Date(timeIntervalSince1970: weeklyResetTs) : nil
+
+        return AgentStat(
+            id: "codex",
+            name: "Codex",
+            color: .blue,
+            sessionPercent: sessionPct,
+            sessionSubtitle: formatSessionReset(percent: sessionPct, resetDate: sessionResetDate),
+            weeklyPercent: weeklyPct,
+            weeklySubtitle: formatWeeklyReset(resetDate: weeklyResetDate)
+        )
+    }
+
+    nonisolated private static func fetchGeminiQuota(previous: AgentStat?) -> AgentStat? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let agyDB = "\(home)/.gemini/antigravity/conversation_summaries.db"
+
+        var dbWeeklySteps = 0
+        var weeklyResetDate: Date? = nil
+
+        if FileManager.default.fileExists(atPath: agyDB) {
+            var db: OpaquePointer?
+            let openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
+            let rc = sqlite3_open_v2(agyDB, &db, openFlags, nil) == SQLITE_OK
+                ? SQLITE_OK
+                : sqlite3_open_v2(agyDB, &db, SQLITE_OPEN_READONLY, nil)
+            if rc == SQLITE_OK, let db = db {
+                sqlite3_busy_timeout(db, 3000)
+                defer { sqlite3_close(db) }
+
+                let sql = "SELECT COALESCE(SUM(step_count), 0), MIN(last_modified_time) FROM conversation_summaries WHERE datetime(last_modified_time) >= datetime('now', '-7 days') AND step_count > 0"
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                    defer { sqlite3_finalize(stmt) }
+                    if sqlite3_step(stmt) == SQLITE_ROW {
+                        dbWeeklySteps = Int(sqlite3_column_int64(stmt, 0))
+                        if let cStr = sqlite3_column_text(stmt, 1) {
+                            let rawStr = String(cString: cStr).replacingOccurrences(of: " ", with: "T")
+                            if let minDate = parseISO8601(rawStr) {
+                                weeklyResetDate = minDate.addingTimeInterval(7 * 24 * 3600)
+                            }
+                        }
+                    }
+                }
+            } else if db != nil {
+                sqlite3_close(db)
+            }
+        }
+
+        // Scan live transcript.jsonl files for steps within the last 5 hours & earliest step timestamp in window
+        var liveSessionSteps = 0
+        var earliest5hDate: Date? = nil
+        let brainDir = URL(fileURLWithPath: "\(home)/.gemini/antigravity/brain")
+        let fiveHoursAgo = Date().addingTimeInterval(-5 * 3600)
+        if let folders = try? FileManager.default.contentsOfDirectory(at: brainDir, includingPropertiesForKeys: nil) {
+            for folder in folders {
+                let transcriptURL = folder.appendingPathComponent(".system_generated/logs/transcript.jsonl")
+                guard let attrs = try? FileManager.default.attributesOfItem(atPath: transcriptURL.path),
+                      let mtime = attrs[.modificationDate] as? Date,
+                      mtime >= fiveHoursAgo,
+                      let content = try? String(contentsOf: transcriptURL, encoding: .utf8) else { continue }
+                for line in content.split(separator: "\n") {
+                    guard let data = line.data(using: .utf8),
+                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let createdStr = obj["created_at"] as? String,
+                          let dt = parseISO8601(createdStr) else { continue }
+                    if dt >= fiveHoursAgo {
+                        liveSessionSteps += 1
+                        if earliest5hDate == nil || dt < earliest5hDate! {
+                            earliest5hDate = dt
+                        }
+                    }
+                }
+            }
+        }
+
+        let sessionResetDate = earliest5hDate.map { $0.addingTimeInterval(5 * 3600) }
+
+        let cachedSession = UserDefaults.standard.integer(forKey: "gemini_cached_session_steps")
+        let cachedWeekly = UserDefaults.standard.integer(forKey: "gemini_cached_weekly_steps")
+
+        var sessionSteps = liveSessionSteps
+        var weeklySteps = max(dbWeeklySteps, sessionSteps)
+
+        if sessionSteps > 0 {
+            UserDefaults.standard.set(sessionSteps, forKey: "gemini_cached_session_steps")
+        } else if cachedSession > 0 {
+            sessionSteps = cachedSession
+        }
+
+        if weeklySteps > 0 {
+            UserDefaults.standard.set(weeklySteps, forKey: "gemini_cached_weekly_steps")
+        } else if cachedWeekly > 0 {
+            weeklySteps = cachedWeekly
+        }
+
+        if sessionSteps == 0 && weeklySteps == 0, let previous = previous {
+            return previous
+        }
+
+        let sessionPct = min(100, Int((Double(sessionSteps) / 1500.0 * 100.0).rounded()))
+        let weeklyPct = min(100, Int((Double(weeklySteps) / 6000.0 * 100.0).rounded()))
+
+        let sessionResetText = formatSessionReset(percent: sessionPct, resetDate: sessionResetDate)
+        let weeklyResetText = weeklyResetDate != nil
+            ? formatWeeklyReset(resetDate: weeklyResetDate)
+            : "Google AI Pro"
+
+        return AgentStat(
+            id: "gemini",
+            name: "Gemini (Antigravity)",
+            color: .purple,
+            sessionPercent: sessionPct,
+            sessionSubtitle: sessionSteps > 0 ? "\(sessionResetText) · \(sessionSteps) 스텝" : "첫 메시지부터 시작됩니다",
+            weeklyPercent: weeklyPct,
+            weeklySubtitle: "\(weeklyResetText) · \(weeklySteps) 스텝"
+        )
+    }
+
+    nonisolated private static func runSecurityCommand(args: [String]) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        proc.arguments = args
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            return nil
+        }
+    }
+
+    nonisolated private static func parseISO8601(_ str: String?) -> Date? {
+        guard let str = str, !str.isEmpty else { return nil }
+        let f1 = ISO8601DateFormatter()
+        f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f1.date(from: str) { return d }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: str)
+    }
+
+    nonisolated private static func roundToNearestMinute(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: (date.timeIntervalSince1970 / 60.0).rounded() * 60.0)
+    }
+
+    nonisolated private static func formatSessionReset(percent: Int, resetDate: Date?) -> String {
+        if percent == 0 || resetDate == nil {
+            return "첫 메시지부터 시작됩니다"
+        }
+        guard let rawDate = resetDate else { return "첫 메시지부터 시작됩니다" }
+        let date = roundToNearestMinute(rawDate)
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "ko_KR")
+        df.timeZone = TimeZone(identifier: "Asia/Seoul")
+        df.dateFormat = "a h:mm에 초기화"
+        return df.string(from: date)
+    }
+
+    nonisolated private static func formatWeeklyReset(resetDate: Date?) -> String {
+        guard let rawDate = resetDate else { return "주간 한도" }
+        let date = roundToNearestMinute(rawDate)
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "ko_KR")
+        df.timeZone = TimeZone(identifier: "Asia/Seoul")
+        df.dateFormat = "(EEEE) a h:mm에 초기화"
+        return df.string(from: date)
     }
 }
 
@@ -774,6 +1109,76 @@ struct DailyCard: View {
                             .lineLimit(1)
                             .foregroundStyle(isPast ? .secondary : .primary)
                         Spacer(minLength: 0)
+                    }
+                }
+            }
+            if model.showAgentUsage && !model.agentStats.isEmpty {
+                let barTotalWidth: CGFloat = compact ? 187 : 200
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(model.agentStats) { stat in
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(stat.color)
+                                    .frame(width: 6, height: 6)
+                                Text(stat.name)
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            // 현재 세션 (5시간 한도)
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text("현재 세션")
+                                        .font(.system(size: 11, weight: .semibold))
+                                    Spacer()
+                                    Text("\(stat.sessionPercent)% 사용됨")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .monospacedDigit()
+                                        .foregroundStyle(.secondary)
+                                }
+                                ZStack(alignment: .leading) {
+                                    Capsule()
+                                        .fill(Color.primary.opacity(0.12))
+                                        .frame(width: barTotalWidth, height: 5)
+                                    Capsule()
+                                        .fill(stat.color)
+                                        .frame(width: max(0, min(barTotalWidth, barTotalWidth * CGFloat(stat.sessionPercent) / 100.0)), height: 5)
+                                }
+                                .frame(height: 5)
+                                Text(stat.sessionSubtitle)
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            // 이번 주 (주간 한도)
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text("이번 주")
+                                        .font(.system(size: 11, weight: .semibold))
+                                    Spacer()
+                                    Text("\(stat.weeklyPercent)% 사용됨")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .monospacedDigit()
+                                        .foregroundStyle(.secondary)
+                                }
+                                ZStack(alignment: .leading) {
+                                    Capsule()
+                                        .fill(Color.primary.opacity(0.12))
+                                        .frame(width: barTotalWidth, height: 5)
+                                    Capsule()
+                                        .fill(stat.color)
+                                        .frame(width: max(0, min(barTotalWidth, barTotalWidth * CGFloat(stat.weeklyPercent) / 100.0)), height: 5)
+                                }
+                                .frame(height: 5)
+                                Text(stat.weeklySubtitle)
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(8)
+                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
             }
@@ -1270,6 +1675,8 @@ struct SettingsView: View {
                     }
 
                     Toggle("5분마다 자동 갱신 (날씨 · TMAP 경로 · 일정)", isOn: $model.autoRefreshEnabled)
+                        .font(.callout)
+                    Toggle("위젯에 AI 에이전트 사용량 현황 표시 (Antigravity · Codex · Claude)", isOn: $model.showAgentUsage)
                         .font(.callout)
                     Toggle("시간대별 출발↔도착 자동 전환 (\(model.departureHour)시 이후 반대 방향 표시)", isOn: $model.autoSwapByTime)
                         .font(.callout)
