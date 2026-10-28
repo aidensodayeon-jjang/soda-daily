@@ -434,13 +434,36 @@ struct SearchCandidate: Identifiable {
         self.agentStats = stats
     }
 
+    nonisolated private static func cachedClaudeStat() -> AgentStat {
+        let ud = UserDefaults.standard
+        let sPct = ud.object(forKey: "claude_cached_session_pct") as? Int ?? 0
+        let sSub = ud.string(forKey: "claude_cached_session_sub") ?? "첫 메시지부터 시작됩니다"
+        let wPct = ud.object(forKey: "claude_cached_weekly_pct") as? Int ?? 15
+        let wSub = ud.string(forKey: "claude_cached_weekly_sub") ?? "(수요일) 오전 9:00에 초기화"
+        return AgentStat(
+            id: "claude",
+            name: "Claude",
+            color: .orange,
+            sessionPercent: sPct,
+            sessionSubtitle: sSub,
+            weeklyPercent: wPct,
+            weeklySubtitle: wSub
+        )
+    }
+
     nonisolated private static func fetchClaudeQuota() async -> AgentStat? {
+        let ud = UserDefaults.standard
+        let lastFetch = ud.double(forKey: "claude_last_fetch_ts")
+        if Date().timeIntervalSince1970 - lastFetch < 180, ud.object(forKey: "claude_cached_weekly_pct") != nil {
+            return cachedClaudeStat()
+        }
+
         guard let rawCreds = runSecurityCommand(args: ["find-generic-password", "-s", "Claude Code-credentials", "-w"]),
               let data = rawCreds.data(using: .utf8),
               var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               var oauth = root["claudeAiOauth"] as? [String: Any],
               var accessToken = oauth["accessToken"] as? String else {
-            return nil
+            return cachedClaudeStat()
         }
 
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
@@ -501,7 +524,7 @@ struct SearchCandidate: Identifiable {
 
         guard let (status, uData) = usageResp, status == 200,
               let json = try? JSONSerialization.jsonObject(with: uData) as? [String: Any] else {
-            return nil
+            return cachedClaudeStat()
         }
 
         let fiveHour = json["five_hour"] as? [String: Any]
@@ -510,19 +533,44 @@ struct SearchCandidate: Identifiable {
         let sessionPct = Int(((fiveHour?["utilization"] as? Double) ?? 0.0).rounded())
         let sessionResetStr = fiveHour?["resets_at"] as? String
         let sessionResetDate = parseISO8601(sessionResetStr)
+        let sessionSub = formatSessionReset(percent: sessionPct, resetDate: sessionResetDate)
 
         let weeklyPct = Int(((sevenDay?["utilization"] as? Double) ?? 0.0).rounded())
         let weeklyResetStr = sevenDay?["resets_at"] as? String
         let weeklyResetDate = parseISO8601(weeklyResetStr)
+        let weeklySub = formatWeeklyReset(resetDate: weeklyResetDate)
+
+        ud.set(sessionPct, forKey: "claude_cached_session_pct")
+        ud.set(sessionSub, forKey: "claude_cached_session_sub")
+        ud.set(weeklyPct, forKey: "claude_cached_weekly_pct")
+        ud.set(weeklySub, forKey: "claude_cached_weekly_sub")
+        ud.set(Date().timeIntervalSince1970, forKey: "claude_last_fetch_ts")
 
         return AgentStat(
             id: "claude",
             name: "Claude",
             color: .orange,
             sessionPercent: sessionPct,
-            sessionSubtitle: formatSessionReset(percent: sessionPct, resetDate: sessionResetDate),
+            sessionSubtitle: sessionSub,
             weeklyPercent: weeklyPct,
-            weeklySubtitle: formatWeeklyReset(resetDate: weeklyResetDate)
+            weeklySubtitle: weeklySub
+        )
+    }
+
+    nonisolated private static func cachedCodexStat() -> AgentStat? {
+        let ud = UserDefaults.standard
+        guard let wPct = ud.object(forKey: "codex_cached_weekly_pct") as? Int else { return nil }
+        let sPct = ud.integer(forKey: "codex_cached_session_pct")
+        let sSub = ud.string(forKey: "codex_cached_session_sub") ?? "첫 메시지부터 시작됩니다"
+        let wSub = ud.string(forKey: "codex_cached_weekly_sub") ?? "주간 한도"
+        return AgentStat(
+            id: "codex",
+            name: "Codex",
+            color: .blue,
+            sessionPercent: sPct,
+            sessionSubtitle: sSub,
+            weeklyPercent: wPct,
+            weeklySubtitle: wSub
         )
     }
 
@@ -534,7 +582,7 @@ struct SearchCandidate: Identifiable {
               let tokens = authObj["tokens"] as? [String: Any],
               let accessToken = tokens["access_token"] as? String,
               let url = URL(string: "https://chatgpt.com/backend-api/wham/usage") else {
-            return nil
+            return cachedCodexStat()
         }
         let accountId = (tokens["account_id"] as? String) ?? ""
         var req = URLRequest(url: url)
@@ -549,7 +597,7 @@ struct SearchCandidate: Identifiable {
               (resp as? HTTPURLResponse)?.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rateLimit = json["rate_limit"] as? [String: Any] else {
-            return nil
+            return cachedCodexStat()
         }
 
         let primary = rateLimit["primary_window"] as? [String: Any]
@@ -558,19 +606,27 @@ struct SearchCandidate: Identifiable {
         let sessionPct = (primary?["used_percent"] as? Int) ?? Int(((primary?["used_percent"] as? Double) ?? 0.0).rounded())
         let sessionResetTs = (primary?["reset_at"] as? Double) ?? Double((primary?["reset_at"] as? Int) ?? 0)
         let sessionResetDate = sessionResetTs > 0 ? Date(timeIntervalSince1970: sessionResetTs) : nil
+        let sessionSub = formatSessionReset(percent: sessionPct, resetDate: sessionResetDate)
 
         let weeklyPct = (secondary?["used_percent"] as? Int) ?? Int(((secondary?["used_percent"] as? Double) ?? 0.0).rounded())
         let weeklyResetTs = (secondary?["reset_at"] as? Double) ?? Double((secondary?["reset_at"] as? Int) ?? 0)
         let weeklyResetDate = weeklyResetTs > 0 ? Date(timeIntervalSince1970: weeklyResetTs) : nil
+        let weeklySub = formatWeeklyReset(resetDate: weeklyResetDate)
+
+        let ud = UserDefaults.standard
+        ud.set(sessionPct, forKey: "codex_cached_session_pct")
+        ud.set(sessionSub, forKey: "codex_cached_session_sub")
+        ud.set(weeklyPct, forKey: "codex_cached_weekly_pct")
+        ud.set(weeklySub, forKey: "codex_cached_weekly_sub")
 
         return AgentStat(
             id: "codex",
             name: "Codex",
             color: .blue,
             sessionPercent: sessionPct,
-            sessionSubtitle: formatSessionReset(percent: sessionPct, resetDate: sessionResetDate),
+            sessionSubtitle: sessionSub,
             weeklyPercent: weeklyPct,
-            weeklySubtitle: formatWeeklyReset(resetDate: weeklyResetDate)
+            weeklySubtitle: weeklySub
         )
     }
 
@@ -661,10 +717,13 @@ struct SearchCandidate: Identifiable {
             return previous
         }
 
-        let sessionPct = min(100, Int((Double(sessionSteps) / 1500.0 * 100.0).rounded()))
-        let weeklyPct = min(100, Int((Double(weeklySteps) / 6000.0 * 100.0).rounded()))
+        let (cloudUsedPct, cloudResetDate) = readCloudGeminiQuota(home: home)
 
-        let sessionResetText = formatSessionReset(percent: sessionPct, resetDate: sessionResetDate)
+        let sessionPct = max(cloudUsedPct, min(100, Int((Double(sessionSteps) / 1500.0 * 100.0).rounded())))
+        let weeklyPct = max(cloudUsedPct, min(100, Int((Double(weeklySteps) / 6000.0 * 100.0).rounded())))
+
+        let finalSessionReset = sessionResetDate ?? cloudResetDate
+        let sessionResetText = formatSessionReset(percent: sessionPct, resetDate: finalSessionReset)
         let weeklyResetText = weeklyResetDate != nil
             ? formatWeeklyReset(resetDate: weeklyResetDate)
             : "Google AI Pro"
@@ -674,10 +733,69 @@ struct SearchCandidate: Identifiable {
             name: "Gemini (Antigravity)",
             color: .purple,
             sessionPercent: sessionPct,
-            sessionSubtitle: sessionSteps > 0 ? "\(sessionResetText) · \(sessionSteps) 스텝" : "첫 메시지부터 시작됩니다",
+            sessionSubtitle: sessionSteps > 0 ? "\(sessionResetText) · 이 맥 \(sessionSteps) 스텝" : (cloudUsedPct > 0 ? "\(sessionResetText) (계정 통합)" : "첫 메시지부터 시작됩니다"),
             weeklyPercent: weeklyPct,
-            weeklySubtitle: "\(weeklyResetText) · \(weeklySteps) 스텝"
+            weeklySubtitle: "\(weeklyResetText) · 이 맥 \(weeklySteps) 스텝"
         )
+    }
+
+    nonisolated private static func readCloudGeminiQuota(home: String) -> (Int, Date?) {
+        let candidates = [
+            "\(home)/Library/Application Support/Antigravity IDE/User/globalStorage/state.vscdb",
+            "\(home)/Library/Application Support/Antigravity/User/globalStorage/state.vscdb"
+        ]
+        var b64Value: String?
+        for path in candidates where FileManager.default.fileExists(atPath: path) {
+            var db: OpaquePointer?
+            if sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK {
+                sqlite3_busy_timeout(db, 1500)
+                defer { sqlite3_close(db) }
+                let sql = "SELECT value FROM ItemTable WHERE key = 'antigravityUnifiedStateSync.userStatus' LIMIT 1"
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                    defer { sqlite3_finalize(stmt) }
+                    if sqlite3_step(stmt) == SQLITE_ROW, let cStr = sqlite3_column_text(stmt, 0) {
+                        b64Value = String(cString: cStr)
+                        break
+                    }
+                }
+            } else if db != nil {
+                sqlite3_close(db)
+            }
+        }
+        guard let outerB64 = b64Value, let outerData = Data(base64Encoded: outerB64) else {
+            return (0, nil)
+        }
+        let marker = Data("GgV".utf8)
+        guard let range = outerData.range(of: marker) else { return (0, nil) }
+        var endIdx = range.lowerBound
+        let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".utf8)
+        while endIdx < outerData.endIndex && allowed.contains(outerData[endIdx]) {
+            endIdx += 1
+        }
+        guard let innerB64 = String(data: outerData[range.lowerBound..<endIdx], encoding: .utf8),
+              let innerData = Data(base64Encoded: innerB64) else {
+            return (0, nil)
+        }
+        var maxUsedPct = 0
+        var searchStart = innerData.startIndex
+        let quotaHeader = Data([0x7a, 0x0d, 0x0d])
+        while searchStart < innerData.endIndex,
+              let qRange = innerData[searchStart..<innerData.endIndex].range(of: quotaHeader),
+              qRange.upperBound + 4 <= innerData.endIndex {
+            let floatBytes = Array(innerData[qRange.upperBound..<(qRange.upperBound + 4)])
+            let bits = UInt32(floatBytes[0])
+                | (UInt32(floatBytes[1]) << 8)
+                | (UInt32(floatBytes[2]) << 16)
+                | (UInt32(floatBytes[3]) << 24)
+            let remaining = Float(bitPattern: bits)
+            if remaining >= 0.0 && remaining <= 1.0 {
+                let used = Int(((1.0 - Double(remaining)) * 100.0).rounded())
+                if used > maxUsedPct { maxUsedPct = used }
+            }
+            searchStart = qRange.upperBound + 4
+        }
+        return (maxUsedPct, nil)
     }
 
     nonisolated private static func runSecurityCommand(args: [String]) -> String? {
