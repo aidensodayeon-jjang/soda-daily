@@ -7,7 +7,12 @@ APP=build/SODADaily.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
-swiftc -parse-as-library -swift-version 5 -target "$(uname -m)-apple-macos14.0" -O \
+SDK_ARGS=()
+if [[ -d "/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk" ]]; then
+  SDK_ARGS=(-sdk "/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk")
+fi
+
+swiftc "${SDK_ARGS[@]}" -parse-as-library -swift-version 5 -target "$(uname -m)-apple-macos14.0" -O \
   SODADaily/SODADailyApp.swift -o "$APP/Contents/MacOS/SODADaily"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'

@@ -31,6 +31,11 @@ struct SearchCandidate: Identifiable {
     static let shared = DailyModel()
     @Published var temperature: Double?
     @Published var weatherDescription = "조회 전"
+    @Published var todayMinTemp: Double?
+    @Published var todayMaxTemp: Double?
+    @Published var tomorrowMinTemp: Double?
+    @Published var tomorrowMaxTemp: Double?
+    @Published var tomorrowWeatherDescription = "조회 전"
     @Published var tripMinutes: Int?
     @Published var tripName = "경로"
     @Published var routeUpdated: Date?
@@ -157,7 +162,13 @@ struct SearchCandidate: Identifiable {
     }
 
     var weatherSymbol: String {
-        switch weatherDescription {
+        Self.symbol(for: weatherDescription)
+    }
+    var tomorrowWeatherSymbol: String {
+        Self.symbol(for: tomorrowWeatherDescription)
+    }
+    private static func symbol(for desc: String) -> String {
+        switch desc {
         case "맑음": return "sun.max.fill"
         case "흐림", "구름": return "cloud.fill"
         case "비": return "cloud.rain.fill"
@@ -195,6 +206,8 @@ struct SearchCandidate: Identifiable {
             URLQueryItem(name: "latitude", value: String(lat)),
             URLQueryItem(name: "longitude", value: String(lon)),
             URLQueryItem(name: "current", value: "temperature_2m,weather_code"),
+            URLQueryItem(name: "daily", value: "weather_code,temperature_2m_max,temperature_2m_min"),
+            URLQueryItem(name: "forecast_days", value: "2"),
             URLQueryItem(name: "timezone", value: "Asia/Seoul")
         ]
         guard let url = parts.url else { return }
@@ -204,6 +217,15 @@ struct SearchCandidate: Identifiable {
             let value = try JSONDecoder().decode(WeatherResponse.self, from: data)
             temperature = value.current.temperature_2m
             weatherDescription = Self.weatherText(value.current.weather_code)
+            if let daily = value.daily {
+                if let mins = daily.temperature_2m_min, mins.count >= 1 { todayMinTemp = mins[0] }
+                if let maxs = daily.temperature_2m_max, maxs.count >= 1 { todayMaxTemp = maxs[0] }
+                if let mins = daily.temperature_2m_min, mins.count >= 2 { tomorrowMinTemp = mins[1] }
+                if let maxs = daily.temperature_2m_max, maxs.count >= 2 { tomorrowMaxTemp = maxs[1] }
+                if let codes = daily.weather_code, codes.count >= 2 {
+                    tomorrowWeatherDescription = Self.weatherText(codes[1])
+                }
+            }
             weatherUpdated = Date()
         } catch { errorMessage = "날씨 조회 실패: \(error.localizedDescription)" }
     }
@@ -378,8 +400,16 @@ struct SearchCandidate: Identifiable {
     }
 }
 
-private struct WeatherResponse: Decodable { let current: WeatherCurrent }
+private struct WeatherResponse: Decodable {
+    let current: WeatherCurrent
+    let daily: WeatherDaily?
+}
 private struct WeatherCurrent: Decodable { let temperature_2m: Double; let weather_code: Int }
+private struct WeatherDaily: Decodable {
+    let weather_code: [Int]?
+    let temperature_2m_max: [Double]?
+    let temperature_2m_min: [Double]?
+}
 private struct TMapResponse: Decodable { let features: [RouteFeature] }
 private struct RouteFeature: Decodable { let properties: RouteProperties? }
 private struct RouteProperties: Decodable { let totalTime: Int? }
@@ -502,13 +532,55 @@ struct DailyCard: View {
             }
             Divider()
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: model.weatherSymbol).font(.system(size: 26)).foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.temperature.map { "\(Int($0.rounded()))°C" } ?? "--°C").font(.system(size: 26, weight: .semibold, design: .rounded))
-                    Text(model.weatherDescription).font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("오늘 · \(model.currentStartPlace?.name ?? "날씨")")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(alignment: .center, spacing: 7) {
+                        Image(systemName: model.weatherSymbol)
+                            .font(.system(size: 22))
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(model.temperature.map { "\(Int($0.rounded()))°C" } ?? "--°C")
+                                .font(.system(size: 22, weight: .semibold, design: .rounded))
+                            if let minT = model.todayMinTemp, let maxT = model.todayMaxTemp {
+                                Text("\(model.weatherDescription) \(Int(minT.rounded()))°/\(Int(maxT.rounded()))°")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text(model.weatherDescription)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
                 }
-                Spacer()
-                Text(model.currentStartPlace?.name ?? "날씨").font(.caption2).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Divider()
+                    .frame(height: 36)
+                Spacer(minLength: 4)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("내일 날씨")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(alignment: .center, spacing: 6) {
+                        Image(systemName: model.tomorrowWeatherSymbol)
+                            .font(.system(size: 19))
+                            .foregroundStyle(.cyan)
+                        VStack(alignment: .leading, spacing: 1) {
+                            if let minT = model.tomorrowMinTemp, let maxT = model.tomorrowMaxTemp {
+                                Text("\(Int(minT.rounded()))° / \(Int(maxT.rounded()))°C")
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            } else {
+                                Text("--° / --°C")
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            }
+                            Text(model.tomorrowWeatherDescription)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
             Divider()
             VStack(alignment: .leading, spacing: 6) {
@@ -685,13 +757,68 @@ struct DailyCard: View {
         .padding(16)
         .frame(width: compact ? 235 : 248)
         .fixedSize(horizontal: false, vertical: true)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.15)))
+        .background {
+            ZStack {
+                GlassVisualEffectView(material: .popover, blendingMode: .behindWindow)
+                    .opacity(0.68)
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.24),
+                        Color.white.opacity(0.08),
+                        Color.white.opacity(0.02)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.55),
+                            Color.white.opacity(0.22),
+                            Color.white.opacity(0.08)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+        )
         .padding(compact ? 0 : 8)
     }
 }
 
+final class MovableVisualEffectView: NSVisualEffectView {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
+struct GlassVisualEffectView: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .popover
+    var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
+
+    func makeNSView(context: Context) -> MovableVisualEffectView {
+        let view = MovableVisualEffectView()
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = .active
+        view.isEmphasized = true
+        return view
+    }
+
+    func updateNSView(_ nsView: MovableVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = blendingMode
+        nsView.state = .active
+    }
+}
+
 final class AutoSizingHostingView<Content: View>: NSHostingView<Content> {
+    override var mouseDownCanMoveWindow: Bool { true }
+
     override func layout() {
         super.layout()
         guard let window = self.window else { return }
@@ -706,6 +833,10 @@ final class AutoSizingHostingView<Content: View>: NSHostingView<Content> {
 }
 
 final class FloatingPanel: NSPanel {
+    private var dragStartMouseLocation: NSPoint?
+    private var dragStartWindowOrigin: NSPoint?
+    private var isDraggingWindow = false
+
     init(model: DailyModel) {
         let rect = NSRect(x: 0, y: 0, width: 264, height: 420)
         super.init(contentRect: rect, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -713,6 +844,7 @@ final class FloatingPanel: NSPanel {
         self.hidesOnDeactivate = false
         self.level = .normal
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        self.isMovable = true
         self.isMovableByWindowBackground = true
         self.backgroundColor = .clear
         self.isOpaque = false
@@ -721,15 +853,49 @@ final class FloatingPanel: NSPanel {
         hosting.sizingOptions = [.intrinsicContentSize]
         self.contentView = hosting
         setContentSize(hosting.fittingSize)
-        if let visible = NSScreen.main?.visibleFrame {
+        if let savedX = UserDefaults.standard.object(forKey: "panelOriginX") as? Double,
+           let savedY = UserDefaults.standard.object(forKey: "panelOriginY") as? Double {
+            setFrameOrigin(NSPoint(x: savedX, y: savedY))
+        } else if let visible = NSScreen.main?.visibleFrame {
             setFrameTopLeftPoint(NSPoint(x: visible.maxX - frame.width - 16, y: visible.maxY - 16))
         } else { center() }
     }
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .leftMouseDown || event.type == .rightMouseDown {
+        switch event.type {
+        case .leftMouseDown:
             self.orderFrontRegardless()
+            dragStartMouseLocation = NSEvent.mouseLocation
+            dragStartWindowOrigin = self.frame.origin
+            isDraggingWindow = false
+            super.sendEvent(event)
+        case .leftMouseDragged:
+            if let startMouse = dragStartMouseLocation, let startOrigin = dragStartWindowOrigin {
+                let currentMouse = NSEvent.mouseLocation
+                let dx = currentMouse.x - startMouse.x
+                let dy = currentMouse.y - startMouse.y
+                if isDraggingWindow || hypot(dx, dy) > 3 {
+                    isDraggingWindow = true
+                    let newOrigin = NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy)
+                    self.setFrameOrigin(newOrigin)
+                    UserDefaults.standard.set(Double(newOrigin.x), forKey: "panelOriginX")
+                    UserDefaults.standard.set(Double(newOrigin.y), forKey: "panelOriginY")
+                    return
+                }
+            }
+            super.sendEvent(event)
+        case .leftMouseUp:
+            let wasDragging = isDraggingWindow
+            isDraggingWindow = false
+            dragStartMouseLocation = nil
+            dragStartWindowOrigin = nil
+            if wasDragging { return }
+            super.sendEvent(event)
+        case .rightMouseDown:
+            self.orderFrontRegardless()
+            super.sendEvent(event)
+        default:
+            super.sendEvent(event)
         }
-        super.sendEvent(event)
     }
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
