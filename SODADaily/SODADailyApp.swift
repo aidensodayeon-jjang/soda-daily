@@ -436,8 +436,8 @@ struct SearchCandidate: Identifiable {
         let ud = UserDefaults.standard
         let sPct = ud.object(forKey: "claude_cached_session_pct") as? Int ?? 0
         let sSub = ud.string(forKey: "claude_cached_session_sub") ?? "첫 메시지부터 시작됩니다"
-        let wPct = ud.object(forKey: "claude_cached_weekly_pct") as? Int ?? 15
-        let wSub = ud.string(forKey: "claude_cached_weekly_sub") ?? "(수요일) 오전 9:00에 초기화"
+        let wPct = ud.object(forKey: "claude_cached_weekly_pct") as? Int ?? 0
+        let wSub = ud.string(forKey: "claude_cached_weekly_sub") ?? "사용량을 불러오지 못했습니다"
         return AgentStat(
             id: "claude",
             name: "Claude",
@@ -446,6 +446,18 @@ struct SearchCandidate: Identifiable {
             sessionSubtitle: sSub,
             weeklyPercent: wPct,
             weeklySubtitle: wSub
+        )
+    }
+
+    nonisolated private static func claudeLoginNeededStat() -> AgentStat {
+        AgentStat(
+            id: "claude",
+            name: "Claude",
+            color: .orange,
+            sessionPercent: 0,
+            sessionSubtitle: "로그인 만료 — 터미널에서 claude 실행 후 /login",
+            weeklyPercent: 0,
+            weeklySubtitle: "로그인 만료"
         )
     }
 
@@ -480,11 +492,17 @@ struct SearchCandidate: Identifiable {
         }
 
         var usageResp: (Int, Data)?
-        if expiresAt > 0 && nowMs < expiresAt - 60_000 {
+        // expiresAt이 0(미기록)이면 일단 현재 토큰으로 시도
+        if expiresAt == 0 || nowMs < expiresAt - 60_000 {
             usageResp = await callUsage(token: accessToken)
         }
 
         if usageResp == nil || usageResp?.0 == 401 {
+            let refreshExp = (oauth["refreshTokenExpiresAt"] as? NSNumber)?.int64Value ?? 0
+            if refreshExp > 0 && nowMs > refreshExp {
+                ud.removeObject(forKey: "claude_cached_weekly_pct")
+                return claudeLoginNeededStat()
+            }
             if let refreshToken = oauth["refreshToken"] as? String,
                let refreshURL = URL(string: "https://platform.claude.com/v1/oauth/token") {
                 var rReq = URLRequest(url: refreshURL)
@@ -520,6 +538,10 @@ struct SearchCandidate: Identifiable {
             }
         }
 
+        if usageResp?.0 == 401 || usageResp?.0 == 403 {
+            ud.removeObject(forKey: "claude_cached_weekly_pct")
+            return claudeLoginNeededStat()
+        }
         guard let (status, uData) = usageResp, status == 200,
               let json = try? JSONSerialization.jsonObject(with: uData) as? [String: Any] else {
             return cachedClaudeStat()
