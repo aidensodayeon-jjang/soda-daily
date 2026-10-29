@@ -71,6 +71,7 @@ struct SearchCandidate: Identifiable {
     @AppStorage("autoSwapByTime") var autoSwapByTime = false
     @AppStorage("autoRefreshEnabled") var autoRefreshEnabled = true
     @AppStorage("showAgentUsage") var showAgentUsage = true
+    @AppStorage("agentSectionExpanded") var agentSectionExpanded = true
 
     @AppStorage("homeLat") var homeLat = ""
     @AppStorage("homeLon") var homeLon = ""
@@ -1234,69 +1235,112 @@ struct DailyCard: View {
                 let barTotalWidth: CGFloat = compact ? 187 : 200
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(model.agentStats) { stat in
-                        VStack(alignment: .leading, spacing: 7) {
-                            HStack(spacing: 5) {
-                                Circle()
-                                    .fill(stat.color)
-                                    .frame(width: 6, height: 6)
-                                Text(stat.name)
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundStyle(.secondary)
+                    Button {
+                        model.agentSectionExpanded.toggle()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.secondary)
+                            Text("에이전트 사용량")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.primary)
+                            if !model.agentSectionExpanded {
+                                HStack(spacing: 6) {
+                                    ForEach(model.agentStats) { stat in
+                                        HStack(spacing: 2) {
+                                            Circle()
+                                                .fill(stat.color)
+                                                .frame(width: 5, height: 5)
+                                            Text("\(stat.weeklyPercent)%")
+                                                .font(.system(size: 9.5, weight: .medium))
+                                                .monospacedDigit()
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
                             }
-
-                            // 현재 세션 (5시간 한도)
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(alignment: .firstTextBaseline) {
-                                    Text("현재 세션")
-                                        .font(.system(size: 11, weight: .semibold))
-                                    Spacer()
-                                    Text("\(stat.sessionPercent)% 사용됨")
-                                        .font(.system(size: 10, weight: .medium))
-                                        .monospacedDigit()
-                                        .foregroundStyle(.secondary)
-                                }
-                                ZStack(alignment: .leading) {
-                                    Capsule()
-                                        .fill(Color.primary.opacity(0.12))
-                                        .frame(width: barTotalWidth, height: 5)
-                                    Capsule()
-                                        .fill(stat.color)
-                                        .frame(width: max(0, min(barTotalWidth, barTotalWidth * CGFloat(stat.sessionPercent) / 100.0)), height: 5)
-                                }
-                                .frame(height: 5)
-                                Text(stat.sessionSubtitle)
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.secondary)
+                            Spacer()
+                            HStack(spacing: 3) {
+                                Text(model.agentSectionExpanded ? "접기" : "펼치기")
+                                    .font(.system(size: 9.5, weight: .medium))
+                                Image(systemName: model.agentSectionExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 9, weight: .bold))
                             }
-
-                            // 이번 주 (주간 한도)
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(alignment: .firstTextBaseline) {
-                                    Text("이번 주")
-                                        .font(.system(size: 11, weight: .semibold))
-                                    Spacer()
-                                    Text("\(stat.weeklyPercent)% 사용됨")
-                                        .font(.system(size: 10, weight: .medium))
-                                        .monospacedDigit()
-                                        .foregroundStyle(.secondary)
-                                }
-                                ZStack(alignment: .leading) {
-                                    Capsule()
-                                        .fill(Color.primary.opacity(0.12))
-                                        .frame(width: barTotalWidth, height: 5)
-                                    Capsule()
-                                        .fill(stat.color)
-                                        .frame(width: max(0, min(barTotalWidth, barTotalWidth * CGFloat(stat.weeklyPercent) / 100.0)), height: 5)
-                                }
-                                .frame(height: 5)
-                                Text(stat.weeklySubtitle)
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.secondary)
-                            }
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.07), in: Capsule())
                         }
-                        .padding(8)
-                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if model.agentSectionExpanded {
+                        ForEach(model.agentStats) { stat in
+                            VStack(alignment: .leading, spacing: 7) {
+                                HStack(spacing: 5) {
+                                    Circle()
+                                        .fill(stat.color)
+                                        .frame(width: 6, height: 6)
+                                    Text(stat.name)
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                // 현재 세션 (5시간 한도)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text("현재 세션")
+                                            .font(.system(size: 11, weight: .semibold))
+                                        Spacer()
+                                        Text("\(stat.sessionPercent)% 사용됨")
+                                            .font(.system(size: 10, weight: .medium))
+                                            .monospacedDigit()
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    ZStack(alignment: .leading) {
+                                        Capsule()
+                                            .fill(Color.primary.opacity(0.12))
+                                            .frame(width: barTotalWidth, height: 5)
+                                        Capsule()
+                                            .fill(stat.color)
+                                            .frame(width: max(0, min(barTotalWidth, barTotalWidth * CGFloat(stat.sessionPercent) / 100.0)), height: 5)
+                                    }
+                                    .frame(height: 5)
+                                    Text(stat.sessionSubtitle)
+                                        .font(.system(size: 9.5))
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                // 이번 주 (주간 한도)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text("이번 주")
+                                            .font(.system(size: 11, weight: .semibold))
+                                        Spacer()
+                                        Text("\(stat.weeklyPercent)% 사용됨")
+                                            .font(.system(size: 10, weight: .medium))
+                                            .monospacedDigit()
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    ZStack(alignment: .leading) {
+                                        Capsule()
+                                            .fill(Color.primary.opacity(0.12))
+                                            .frame(width: barTotalWidth, height: 5)
+                                        Capsule()
+                                            .fill(stat.color)
+                                            .frame(width: max(0, min(barTotalWidth, barTotalWidth * CGFloat(stat.weeklyPercent) / 100.0)), height: 5)
+                                    }
+                                    .frame(height: 5)
+                                    Text(stat.weeklySubtitle)
+                                        .font(.system(size: 9.5))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(8)
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                        }
                     }
                 }
             }
