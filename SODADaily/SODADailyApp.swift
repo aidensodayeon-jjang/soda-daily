@@ -847,12 +847,22 @@ struct DailyCard: View {
                             .font(.system(size: 22))
                             .foregroundStyle(.orange)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(model.temperature.map { "\(Int($0.rounded()))°C" } ?? "--°C")
-                                .font(.system(size: 22, weight: .semibold, design: .rounded))
+                            HStack(alignment: .firstTextBaseline, spacing: 1) {
+                                Text(model.temperature.map { "\(Int($0.rounded()))" } ?? "--")
+                                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+                                    .monospacedDigit()
+                                Text("°C")
+                                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .lineLimit(1)
+                            .fixedSize()
                             if let minT = model.todayMinTemp, let maxT = model.todayMaxTemp {
-                                Text("\(model.weatherDescription) \(Int(minT.rounded()))°/\(Int(maxT.rounded()))°")
+                                Text("\(model.weatherDescription) · \(Int(minT.rounded()))° / \(Int(maxT.rounded()))°")
                                     .font(.system(size: 10))
                                     .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .fixedSize()
                             } else {
                                 Text(model.weatherDescription)
                                     .font(.system(size: 10))
@@ -874,13 +884,11 @@ struct DailyCard: View {
                             .font(.system(size: 19))
                             .foregroundStyle(.cyan)
                         VStack(alignment: .leading, spacing: 1) {
-                            if let minT = model.tomorrowMinTemp, let maxT = model.tomorrowMaxTemp {
-                                Text("\(Int(minT.rounded()))° / \(Int(maxT.rounded()))°C")
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            } else {
-                                Text("--° / --°C")
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            }
+                            Text(model.tomorrowMinTemp.flatMap { minT in model.tomorrowMaxTemp.map { "\(Int(minT.rounded()))° / \(Int($0.rounded()))°" } } ?? "--° / --°")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .monospacedDigit()
+                                .lineLimit(1)
+                                .fixedSize()
                             Text(model.tomorrowWeatherDescription)
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
