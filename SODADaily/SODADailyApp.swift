@@ -410,11 +410,57 @@ struct SearchCandidate: Identifiable {
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
     func configureLogin(_ enabled: Bool) {
-        do {
-            if enabled { try SMAppService.mainApp.register() }
-            else { try SMAppService.mainApp.unregister() }
-            openAtLogin = enabled
-        } catch { errorMessage = "로그인 항목 설정 실패: \(error.localizedDescription)" }
+        let launchAgentURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.sodalab.SODADaily.plist")
+        let appPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications/SODADaily.app").path
+
+        if enabled {
+            _ = try? SMAppService.mainApp.register()
+
+            let plistContent = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key>
+                <string>com.sodalab.SODADaily</string>
+                <key>ProgramArguments</key>
+                <array>
+                    <string>/usr/bin/open</string>
+                    <string>-a</string>
+                    <string>\(appPath)</string>
+                </array>
+                <key>RunAtLoad</key>
+                <true/>
+                <key>ProcessType</key>
+                <string>Interactive</string>
+            </dict>
+            </plist>
+            """
+            try? plistContent.write(to: launchAgentURL, atomically: true, encoding: .utf8)
+
+            let script = "tell application \"System Events\" to if not (exists (every login item whose name is \"SODADaily\")) then make login item at end with properties {name:\"SODADaily\", path:\"\(appPath)\", hidden:false}"
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            proc.arguments = ["-e", script]
+            try? proc.run()
+            proc.waitUntilExit()
+
+            openAtLogin = true
+        } else {
+            _ = try? SMAppService.mainApp.unregister()
+            try? FileManager.default.removeItem(at: launchAgentURL)
+
+            let script = "tell application \"System Events\" to delete (every login item whose name is \"SODADaily\")"
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            proc.arguments = ["-e", script]
+            try? proc.run()
+            proc.waitUntilExit()
+
+            openAtLogin = false
+        }
     }
 
     func loadAgentUsage() async {
